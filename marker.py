@@ -1,52 +1,69 @@
 import cv2
 import cv2.aruco as aruco
+import rclpy
+from rclpy.node import Node
+from mavros_msgs.srv import CommandTOL
 
-def detect_aruco_markers():
-    # Load the ArUco dictionary with 7x7 markers
-    aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_7X7_1000)
-    aruco_params = aruco.DetectorParameters()
-    detector = aruco.ArucoDetector(aruco_dict, aruco_params)
+class ArucoLanding(Node):
+    def __init__(self):
+        super().__init__('aruco_landing')
+        self.aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_7X7_1000)
+        self.aruco_params = aruco.DetectorParameters()
+        self.detector = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        self.marker_id = 0  # Target ArUco marker ID
+        self.marker_size = 100  # mm
+        self.cap = cv2.VideoCapture(0)
+        self.landing_client = self.create_client(CommandTOL, '/mavros/cmd/land')
     
-    # Define marker ID and size
-    marker_id = 0
-    marker_size = 100  # mm
+    def detect_aruco_markers(self):
+        while rclpy.ok() and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret:
+                self.get_logger().error("Failed to grab frame")
+                break
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = self.detector.detectMarkers(gray)
+            
+            if ids is not None:
+                aruco.drawDetectedMarkers(frame, corners, ids)
+                for i, detected_id in enumerate(ids):
+                    if detected_id[0] == self.marker_id:
+                        self.get_logger().info(f"Aruco Marker {self.marker_id} detected. Initiating landing...")
+                        self.initiate_landing()
+                        break
+            
+            cv2.imshow('ArUco Marker Detection', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        
+        self.cap.release()
+        cv2.destroyAllWindows()
     
-    # Start video capture
-    cap = cv2.VideoCapture(0)
-    
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            break
+    def initiate_landing(self):
+        if not self.landing_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error("Landing service unavailable")
+            return
         
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        request = CommandTOL.Request()
+        request.altitude = 0.0
+        request.latitude = 0.0
+        request.longitude = 0.0
+        request.min_pitch = 0.0
+        request.yaw = 0.0
         
-        # Detect markers
-        corners, ids, _ = detector.detectMarkers(gray)
-        
-        # Draw markers and display IDs
-        if ids is not None:
-            aruco.drawDetectedMarkers(frame, corners, ids)
-            for i, detected_id in enumerate(ids):
-                if detected_id[0] == marker_id:
-                    c = corners[i][0]
-                    center_x = int((c[0][0] + c[2][0]) / 2)
-                    center_y = int((c[0][1] + c[2][1]) / 2)
-                    cv2.putText(frame, f'ID: {detected_id[0]} Size: {marker_size}mm', 
-                                (center_x, center_y),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Show the frame
-        cv2.imshow('ArUco Marker Detection', frame)
-        
-        # Press 'q' to exit
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    
-    cap.release()
-    cv2.destroyAllWindows()
+        future = self.landing_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+        if future.result() is not None and future.result().success:
+            self.get_logger().info("Landing command sent successfully")
+        else:
+            self.get_logger().error("Landing command failed")
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = ArucoLanding()
+    node.detect_aruco_markers()
+    rclpy.shutdown()
 
 if __name__ == "__main__":
-    detect_aruco_markers()
+    main()
